@@ -11,3 +11,5 @@ wheels/
 
 # Data files
 Server/blogs/
+thinking_to_add_improvements.txt
+.env
