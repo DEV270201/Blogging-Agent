@@ -1,6 +1,7 @@
-"""Public entry point for the chatbot server."""
+"""Public entry point for the blogging agent server"""
 
-from Server.graph import chatbot
-from Server.threads import retrieve_all_threads
+from Server.graph import blog_agent
 
-__all__ = ["chatbot", "retrieve_all_threads"]
+if __name__ == "__main__":
+    blog_agent.invoke({"topic": "Can you write a blog about the benefits of AI?"})
+    # print(blog_agent.get_state())

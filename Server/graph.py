@@ -1,22 +1,18 @@
-from langgraph.graph import START, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
-
-from Server.checkpointer import checkpointer
-from Server.nodes import chat_node, manage_memory
-from Server.state import ChatState
-from Server.tools import tools
+from langgraph.graph import START, StateGraph, END
+from Server.state import BlogState
+from Server.nodes import orchestrator, worker, synthesizer, fanout
 
 
-def build_chatbot():
-    graph = StateGraph(ChatState)
-    graph.add_node("manage_memory", manage_memory)
-    graph.add_node("tools", ToolNode(tools=tools))
-    graph.add_node("chat_node", chat_node)
-    graph.add_edge(START, "manage_memory")
-    graph.add_edge("manage_memory", "chat_node")
-    graph.add_conditional_edges("chat_node", tools_condition)
-    graph.add_edge("tools", "chat_node")
-    return graph.compile(checkpointer=checkpointer)
+def build_blog_agent():
+    graph = StateGraph(BlogState)
+    graph.add_node("orchestrator", orchestrator)
+    graph.add_node("worker", worker)
+    graph.add_node("synthesizer", synthesizer)
+    graph.add_edge(START, "orchestrator")
+    graph.add_conditional_edges("orchestrator", fanout, ["worker"])
+    graph.add_edge("worker", "synthesizer")
+    graph.add_edge("synthesizer", END)
+    return graph.compile()
 
 
-chatbot = build_chatbot()
+blog_agent = build_blog_agent()
