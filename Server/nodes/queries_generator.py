@@ -1,28 +1,40 @@
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from Server.model import llm
 from Server.state import BlogState, QueriesGeneratorDecision
 
 QUERIES_GENERATOR_SYSTEM = """You are a search engine module for a technical blog planner.
-Decide what kind of search queries are needed to write the blog post on the given topic so the reader can find the blog useful and informative.
+Decide what search queries are needed so the blog can be accurate, citable, and safe to publish.
 
-RULES FOR GENERATING SEARCH QUERIES:    
-- Output 3–10 high-signal search queries.
-- Queries should be scoped (avoid generic queries like just "AI" or "LLM"). 
-- Queries should be non-overlapping and specific/related to the topic.
-- If user asked for "last week/this week/latest", reflect that constraint IN THE QUERIES.
+RULES FOR GENERATING SEARCH QUERIES:
+- Output exactly 3–5 high-signal search queries (never more than 5).
+- Queries should be scoped (avoid generic queries like just "AI" or "LLM").
+- Queries should be non-overlapping and specific to the topic.
+- If the topic names a framework, library, cloud provider, or product, include queries aimed at:
+  * official documentation
+  * official blog / release notes
+  * production or deployment guides from the vendor or maintainers
+- Prefer queries that return verifiable facts (APIs, config, deployment steps, limits).
+- Include a comparison query only if the topic explicitly requires comparing tools or vendors.
+- If the user asked for "last week/this week/latest", reflect that constraint IN THE QUERIES.
 """
 
+MAX_SEARCH_QUERIES = 5
+
+
 def queries_generator(state: BlogState) -> BlogState:
-    print(f"Generating search queries......")
+    print("Generating search queries......")
     topic = state["topic"]
-    queries_generator = llm.with_structured_output(QueriesGeneratorDecision)
-    queries = queries_generator.invoke(
+    decision = llm.with_structured_output(QueriesGeneratorDecision).invoke(
         [
             SystemMessage(content=QUERIES_GENERATOR_SYSTEM),
-            HumanMessage(content=f"Topic: {topic}\nPlease generate search queries for the blog post on the topic."),
+            HumanMessage(
+                content=f"Topic: {topic}\nGenerate search queries for a citable technical blog on this topic."
+            ),
         ]
     )
 
-    print(f"Search queries: {queries.queries}")
+    queries = decision.queries[:MAX_SEARCH_QUERIES]
+    print(f"Search queries: {queries}")
 
-    return {"search_queries": queries.queries}
+    return {"search_queries": queries}

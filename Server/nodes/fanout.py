@@ -8,7 +8,7 @@ def fanout(state: BlogState):
             "task": task.model_dump(),
             "topic": state["topic"],
             "plan": state["plan"].model_dump(),
-            "evidence": [e.model_dump() for e in state.get("evidence", {}).get("evidence", [])],
+            "evidence": [e for e in state.get("evidence", {}).get("evidence", [])],
         }) for task in state["plan"].tasks
     ]
 

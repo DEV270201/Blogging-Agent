@@ -1,21 +1,53 @@
 import re
+
 from Server.config import BLOGS_DIR
-from Server.state import BlogState
+from Server.state import BlogState, Plan
+
 
 def _safe_filename(title: str) -> str:
     slug = title.lower().replace(" ", "_")
     slug = re.sub(r'[<>:"/\\|?*]', "", slug)
-    return slug[:200] + ".md"  # optional length cap
+    return slug[:200] + ".md"
+
+
+def _research_banner(plan: Plan) -> str:
+    note = (plan.research_note or "").strip()
+    coverage = plan.evidence_coverage
+
+    if coverage == "sufficient" and not note:
+        return ""
+
+    if note:
+        label = coverage.replace("_", " ")
+        return f"> **Research note ({label} coverage):** {note}\n\n"
+
+    if coverage == "insufficient":
+        return (
+            "> **Research note (insufficient coverage):** "
+            "External sources were limited for this topic. "
+            "Framework-specific details are omitted unless cited below.\n\n"
+        )
+
+    if coverage == "partial":
+        return (
+            "> **Research note (partial coverage):** "
+            "Some sections rely on general engineering guidance. "
+            "Product-specific claims are cited where possible.\n\n"
+        )
+
+    return ""
+
 
 def synthesizer(state: BlogState) -> BlogState:
-    print(f"Synthesizing blog......")
-    
-    title = state["plan"].blog_title
+    print("Synthesizing blog......")
+
+    plan = state["plan"]
+    title = plan.blog_title
+    banner = _research_banner(plan)
     body = "\n\n".join(state["sections"]).strip()
 
-    final_md = f"# {title}\n\n{body}\n"
+    final_md = f"# {title}\n\n{banner}{body}\n"
 
-    # ---- save to file ----
     filename = _safe_filename(title)
     output_path = BLOGS_DIR / filename
     output_path.write_text(final_md, encoding="utf-8")
