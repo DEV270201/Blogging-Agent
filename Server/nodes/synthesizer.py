@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 from Server.config import BLOGS_DIR
 from Server.state import BlogState, Plan
@@ -8,6 +9,10 @@ def _safe_filename(title: str) -> str:
     slug = title.lower().replace(" ", "_")
     slug = re.sub(r'[<>:"/\\|?*]', "", slug)
     return slug[:200] + ".md"
+
+
+def blog_output_path(title: str) -> Path:
+    return BLOGS_DIR / _safe_filename(title)
 
 
 def _research_banner(plan: Plan) -> str:
@@ -48,8 +53,7 @@ def synthesizer(state: BlogState) -> BlogState:
 
     final_md = f"# {title}\n\n{banner}{body}\n"
 
-    filename = _safe_filename(title)
-    output_path = BLOGS_DIR / filename
+    output_path = blog_output_path(title)
     output_path.write_text(final_md, encoding="utf-8")
 
     return {"final_blog": final_md}
