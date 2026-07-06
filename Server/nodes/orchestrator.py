@@ -66,7 +66,7 @@ def orchestrator(state: BlogState) -> BlogState:
         f"Title: {e['title']}\nURL: {e['url']}\nSnippet: {e.get('snippet') or ''}"
         for e in evidence
     )
-    hint = _coverage_hint(evidence_count)
+    hint = _coverage_hint(evidence_count) 
 
     print(f"Evidence items: {evidence_count} ({hint})")
     print("================================================")

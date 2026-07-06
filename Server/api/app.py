@@ -11,12 +11,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+import psycopg
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from Server.config import API_HOST, API_MAX_WORKERS, API_PORT, CORS_ORIGINS
 from Server.persistence.database import check_connection, close_pool
-from Server.persistence.job_repository import JOB_HALTED
+from Server.persistence.job_repository import JOB_HALTED, DBRepositoryError
 from Server.services.blog_job_service import (
     BlogJobService,
     get_blog_job_service,
@@ -24,6 +26,7 @@ from Server.services.blog_job_service import (
 from Server.api.schemas import (
     BlogContentResponse,
     CreateJobRequest,
+    ErrorResponse,
     HealthResponse,
     JobCreatedResponse,
     JobListResponse,
@@ -42,18 +45,18 @@ async def lifespan(app: FastAPI):
     # setup and creates the blog_jobs table. check_connection() then proves the DB
     # is actually reachable — if either step fails the app fails to start and never
     # accepts requests.
-    service = get_blog_job_service()
-    check_connection()
-    logger.info("Database connected and schema ready.")
-
-    app.state.service = service
-    app.state.executor = ThreadPoolExecutor(
-        max_workers=API_MAX_WORKERS,
-        thread_name_prefix="blog-job",
-    )
-    logger.info("Blog agent API ready (max_workers=%s).", API_MAX_WORKERS)
-
     try:
+        logger.info("Starting blog agent API...")
+        service = get_blog_job_service()
+        check_connection()
+        logger.info("Database connected and schema ready.")
+
+        app.state.service = service
+        app.state.executor = ThreadPoolExecutor(
+            max_workers=API_MAX_WORKERS,
+            thread_name_prefix="blog-job",
+        )
+        logger.info("Blog agent API ready (max_workers=%s).", API_MAX_WORKERS)
         yield
     finally:
         app.state.executor.shutdown(wait=False, cancel_futures=True)
@@ -75,6 +78,48 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --- error handling ----------------------------------------------------------
+
+_DB_ERROR_DETAIL = "Something went wrong! Please retry shortly."
+
+
+@app.exception_handler(DBRepositoryError)
+async def repository_error_handler(request: Request, exc: DBRepositoryError) -> JSONResponse:
+    """Turn any DB failure surfaced by the repository into a graceful 503.
+
+    Logs the route (method + path), the failed operation and its metadata (job id,
+    etc.) plus the underlying psycopg traceback, while returning a generic message
+    to the client so driver internals never leak.
+    """
+    logger.error(
+        "DB error on %s %s | operation=%s metadata=%s",
+        request.method,
+        request.url.path,
+        exc.operation,
+        exc.metadata,
+        exc_info=exc.original,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=ErrorResponse(detail=_DB_ERROR_DETAIL).model_dump(),
+    )
+
+
+@app.exception_handler(psycopg.Error)
+async def psycopg_error_handler(request: Request, exc: psycopg.Error) -> JSONResponse:
+    """Fallback for any raw psycopg error that escapes the repository unwrapped."""
+    logger.error(
+        "Unwrapped DB error on %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=ErrorResponse(detail=_DB_ERROR_DETAIL).model_dump(),
+    )
 
 
 # --- dependencies ------------------------------------------------------------
@@ -142,7 +187,7 @@ def create_job(
         job_id=job_id,
         status=job["status"],
         stage=job["stage"],
-    )
+    ) 
 
 
 @app.get("/jobs", response_model=JobListResponse, tags=["jobs"])

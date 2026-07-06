@@ -65,7 +65,7 @@ class Plan(BaseModel):
         ...,
         min_length=1,
         max_length=4,
-        description="1–4 sections. Use 1–2 when evidence is insufficient.",
+        description="3–4 sections. Use 1–2 when evidence is insufficient.",
     )
     audience: str = Field(..., description="Who this blog is for.")
 

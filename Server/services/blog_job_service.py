@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ from Server.persistence.job_repository import (
     STAGE_WRITING_SECTIONS,
     JobRepository,
 )
+
+logger = logging.getLogger("blog_agent.service")
 
 _service: "BlogJobService | None" = None
 
@@ -59,10 +62,10 @@ class BlogJobService:
     def retry(self, job_id: str) -> str:
         """Resume a halted, recoverable job from its last checkpoint."""
         job = self._job_repo.get_job(job_id)
-        if job is None:
-            raise JobNotFoundError(f"Job {job_id} not found")
-        if job["status"] != JOB_HALTED or not job["recoverable"]:
-            raise JobNotResumableError(f"Job {job_id} cannot be resumed")
+        # if job is None:
+        #     raise JobNotFoundError(f"Job {job_id} not found")
+        # if job["status"] != JOB_HALTED or not job["recoverable"]:
+        #     raise JobNotResumableError(f"Job {job_id} cannot be resumed")
 
         config = {"configurable": {"thread_id": job_id}}
         self._job_repo.mark_in_progress(job_id)
@@ -159,20 +162,26 @@ class BlogJobService:
         return None
 
     def _handle_failure(self, job_id: str, config: dict[str, Any]) -> None:
-        job = self._job_repo.get_job(job_id)
-        state = self._agent.get_state(config)
-        research_done = (
-            job is not None and job["research_done"]
-        ) or state.values.get("evidence") is not None
+        # Runs while handling an already-failed run. Guard against a second failure
+        # here (e.g. the DB is what went down) so cleanup errors are logged rather
+        # than masking the original exception the caller is about to re-raise.
+        try:
+            job = self._job_repo.get_job(job_id)
+            state = self._agent.get_state(config)
+            research_done = (
+                job is not None and job["research_done"]
+            ) or state.values.get("evidence") is not None
 
-        if research_done and job is not None:
-            if not job["research_done"]:
-                self._job_repo.mark_research_done(job_id)
-            self._job_repo.mark_halted(job_id)
-        else:
-            delete_checkpoint_thread(job_id)
-            if job is not None:
-                self._job_repo.delete_job(job_id)
+            if research_done and job is not None:
+                if not job["research_done"]:
+                    self._job_repo.mark_research_done(job_id)
+                self._job_repo.mark_halted(job_id)
+            else:
+                delete_checkpoint_thread(job_id)
+                if job is not None:
+                    self._job_repo.delete_job(job_id)
+        except Exception:
+            logger.exception("Failed to record failure state for job %s", job_id)
 
 
 def get_blog_job_service() -> BlogJobService:
