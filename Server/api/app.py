@@ -262,7 +262,11 @@ def retry_job(
             detail="Job is not in a resumable state",
         )
 
+    # Flip to IN-PROGRESS synchronously so a client polling right after this
+    # response never reads the stale HALTED status (which would stop its poll).
+    service.prepare_retry(job_id_str)
     executor.submit(_retry_job_in_background, service, job_id_str)
+    job = service.get_job(job_id_str)
     return JobCreatedResponse(
         job_id=job_id_str,
         status=job["status"],

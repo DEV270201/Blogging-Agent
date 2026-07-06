@@ -1,6 +1,27 @@
 import { STAGES, stageIndex } from "../stages.js";
 
 export default function ProgressView({ job, onRetry, onBack }) {
+  const failed = job.status === "FAILED";
+
+  if (failed) {
+    return (
+      <div className="progress-card fade-in">
+        <div className="halted-icon">⚠️</div>
+        <h2>We couldn't generate your blog</h2>
+        <p className="progress-topic">“{job.topic}”</p>
+        <p className="halted-text">
+          Something went wrong due to an unexpected error. Please try again
+          shortly.
+        </p>
+        <div className="halted-actions">
+          <button className="ghost-btn" onClick={onBack}>
+            Start a new blog
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const halted = job.status === "HALTED";
 
   if (halted) {

@@ -35,6 +35,7 @@ JobStatus = str
 JOB_IN_PROGRESS = "IN-PROGRESS"
 JOB_COMPLETE = "COMPLETE"
 JOB_HALTED = "HALTED"
+JOB_FAILED = "FAILED"
 
 # Fine-grained progress stages, surfaced to the client while a job runs.
 STAGE_QUEUED = "queued"
@@ -45,6 +46,7 @@ STAGE_WRITING_SECTIONS = "writing_sections"
 STAGE_SYNTHESIZING = "synthesizing"
 STAGE_COMPLETE = "complete"
 STAGE_HALTED = "halted"
+STAGE_FAILED = "failed"
 
 _SELECT_COLUMNS = (
     "id, topic, status, stage, recoverable, research_done, "
@@ -106,10 +108,11 @@ class JobRepository:
                         f"""
                         SELECT {_SELECT_COLUMNS}
                         FROM blog_jobs
+                        WHERE status <> %s
                         ORDER BY created_at DESC
                         LIMIT %s OFFSET %s
                         """,
-                        (limit, offset),
+                        (JOB_FAILED, limit, offset),
                     )
                     rows = cur.fetchall()
         return [_row_to_dict(row) for row in rows]
@@ -118,7 +121,10 @@ class JobRepository:
         with _guard("count_jobs"):
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM blog_jobs")
+                    cur.execute(
+                        "SELECT COUNT(*) FROM blog_jobs WHERE status <> %s",
+                        (JOB_FAILED,),
+                    )
                     row = cur.fetchone()
         return int(row[0]) if row else 0
 
@@ -179,6 +185,22 @@ class JobRepository:
                         WHERE id = %s
                         """,
                         (JOB_HALTED, STAGE_HALTED, job_id),
+                    )
+
+    def mark_failed(self, job_id: str) -> None:
+        with _guard("mark_failed", job_id=job_id):
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET status = %s,
+                            stage = %s,
+                            recoverable = FALSE,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (JOB_FAILED, STAGE_FAILED, job_id),
                     )
 
     def mark_in_progress(self, job_id: str) -> None:

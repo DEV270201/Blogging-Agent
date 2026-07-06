@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS blog_jobs (
     id UUID PRIMARY KEY,
     topic TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'IN-PROGRESS'
-        CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED')),
+        CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED')),
     stage TEXT NOT NULL DEFAULT 'queued',
     recoverable BOOLEAN NOT NULL DEFAULT FALSE,
     research_done BOOLEAN NOT NULL DEFAULT FALSE,
@@ -22,6 +22,15 @@ CREATE TABLE IF NOT EXISTS blog_jobs (
 # Backfill for databases created before the stage column existed.
 BLOG_JOBS_STAGE_MIGRATION = (
     "ALTER TABLE blog_jobs ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'queued';"
+)
+
+# Widen the status check constraint for databases created before 'FAILED' existed.
+# Kept as separate statements: the pool prepares every statement (prepare_threshold=0)
+# and a prepared statement cannot carry more than one command.
+BLOG_JOBS_STATUS_MIGRATION = (
+    "ALTER TABLE blog_jobs DROP CONSTRAINT IF EXISTS blog_jobs_status_check;",
+    "ALTER TABLE blog_jobs ADD CONSTRAINT blog_jobs_status_check "
+    "CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED'));",
 )
 
 
@@ -45,6 +54,8 @@ def setup_job_table() -> None:
         with conn.cursor() as cur:
             cur.execute(BLOG_JOBS_SCHEMA)
             cur.execute(BLOG_JOBS_STAGE_MIGRATION)
+            for statement in BLOG_JOBS_STATUS_MIGRATION:
+                cur.execute(statement)
 
 
 def check_connection() -> None:

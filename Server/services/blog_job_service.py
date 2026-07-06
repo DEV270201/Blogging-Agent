@@ -59,16 +59,21 @@ class BlogJobService:
             self._handle_failure(job_id, config)
             raise
 
-    def retry(self, job_id: str) -> str:
-        """Resume a halted, recoverable job from its last checkpoint."""
-        job = self._job_repo.get_job(job_id)
-        # if job is None:
-        #     raise JobNotFoundError(f"Job {job_id} not found")
-        # if job["status"] != JOB_HALTED or not job["recoverable"]:
-        #     raise JobNotResumableError(f"Job {job_id} cannot be resumed")
+    def prepare_retry(self, job_id: str) -> None:
+        """Flip a halted job to in-progress synchronously, in the request thread.
 
-        config = {"configurable": {"thread_id": job_id}}
+        Called before the background retry is submitted so a client that polls
+        immediately sees the IN-PROGRESS switch right away instead of briefly
+        reading the stale HALTED status (which would abort its polling).
+        """
         self._job_repo.mark_in_progress(job_id)
+
+    def retry(self, job_id: str) -> str:
+        """Resume a halted, recoverable job from its last checkpoint.
+
+        Assumes the job was already flipped to IN-PROGRESS via ``prepare_retry``.
+        """
+        config = {"configurable": {"thread_id": job_id}}
         try:
             self._execute_graph(None, config, job_id)
             final_blog_path = self._resolve_blog_path(config)
@@ -177,9 +182,12 @@ class BlogJobService:
                     self._job_repo.mark_research_done(job_id)
                 self._job_repo.mark_halted(job_id)
             else:
+                # No reusable research and the job won't be retried, so drop the
+                # partial checkpoint but keep the job record as FAILED so the client
+                # polling it learns the run failed instead of seeing it vanish.
                 delete_checkpoint_thread(job_id)
                 if job is not None:
-                    self._job_repo.delete_job(job_id)
+                    self._job_repo.mark_failed(job_id)
         except Exception:
             logger.exception("Failed to record failure state for job %s", job_id)
 

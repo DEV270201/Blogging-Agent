@@ -111,6 +111,18 @@ export default function App() {
             "Generation was interrupted. You can retry it from the Recoverable tab."
           );
           handlersRef.current.refreshJobs();
+        } else if (job.status === "FAILED") {
+          setPollId(null);
+          jobs.map((job) => {
+            if (job.id === job.id) {
+              job.status = "FAILED";
+            }
+          });
+          setJobs(jobs);
+          handlersRef.current.addToast(
+            "error",
+            "Something went wrong and we couldn't generate your blog. Please try again shortly. If the problem persists, please contact support."
+          );
         }
       } catch (e) {
         if (alive) handlersRef.current.addToast("error", e.message);

@@ -50,6 +50,7 @@ export const STATUS_META = {
   "IN-PROGRESS": { label: "Generating", className: "progress" },
   COMPLETE: { label: "Complete", className: "complete" },
   HALTED: { label: "Halted", className: "halted" },
+  FAILED: { label: "Failed", className: "failed" },
 };
 
 export function formatDate(iso) {
