@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,13 @@ from Server.persistence.job_repository import (
 logger = logging.getLogger("blog_agent.service")
 
 _service: "BlogJobService | None" = None
+
+# When a run fails, recording its terminal status also needs the DB — which may
+# be exactly what went down. Retry the recording with exponential backoff so the
+# job stops being a zombie once the DB recovers within this window (~60s total).
+_FAILURE_RECORD_MAX_ATTEMPTS = 6
+_FAILURE_RECORD_BASE_DELAY_S = 2.0
+_FAILURE_RECORD_MAX_DELAY_S = 16.0
 
 
 class JobNotFoundError(Exception):
@@ -134,7 +142,7 @@ class BlogJobService:
             if job is not None and job["research_done"]:
                 initial_stage = STAGE_PLANNING
         self._job_repo.update_stage(job_id, initial_stage)
-
+        print(f"Initial stage: {initial_stage}")
         for chunk in self._agent.stream(input_state, config, stream_mode="updates"):
             if "queries_generator" in chunk:
                 self._job_repo.update_stage(job_id, STAGE_RESEARCHING)
@@ -167,29 +175,56 @@ class BlogJobService:
         return None
 
     def _handle_failure(self, job_id: str, config: dict[str, Any]) -> None:
-        # Runs while handling an already-failed run. Guard against a second failure
-        # here (e.g. the DB is what went down) so cleanup errors are logged rather
-        # than masking the original exception the caller is about to re-raise.
-        try:
-            job = self._job_repo.get_job(job_id)
-            state = self._agent.get_state(config)
-            research_done = (
-                job is not None and job["research_done"]
-            ) or state.values.get("evidence") is not None
+        # Runs while handling an already-failed run. Recording the terminal status
+        # also needs the DB (get_job / get_state / mark_*), which may be exactly what
+        # went down. Retry with backoff so the job is flipped to FAILED/HALTED once the
+        # DB recovers; if it never does, log and let the caller re-raise the original
+        # exception. The steps are idempotent, so re-running after a partial write is safe.
+        delay = _FAILURE_RECORD_BASE_DELAY_S
+        last_exc: Exception | None = None
+        for attempt in range(1, _FAILURE_RECORD_MAX_ATTEMPTS + 1):
+            try:
+                self._record_status_during_failure(job_id, config)
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _FAILURE_RECORD_MAX_ATTEMPTS:
+                    logger.warning(
+                        "Attempt %d/%d to record state for job %s failed: %s; "
+                        "retrying in %.0fs",
+                        attempt,
+                        _FAILURE_RECORD_MAX_ATTEMPTS,
+                        job_id,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, _FAILURE_RECORD_MAX_DELAY_S)
+        logger.error(
+            "Failed to record state for job %s after %d attempts",
+            job_id,
+            _FAILURE_RECORD_MAX_ATTEMPTS,
+            exc_info=last_exc,
+        )
 
-            if research_done and job is not None:
-                if not job["research_done"]:
-                    self._job_repo.mark_research_done(job_id)
-                self._job_repo.mark_halted(job_id)
-            else:
-                # No reusable research and the job won't be retried, so drop the
-                # partial checkpoint but keep the job record as FAILED so the client
-                # polling it learns the run failed instead of seeing it vanish.
-                delete_checkpoint_thread(job_id)
-                if job is not None:
-                    self._job_repo.mark_failed(job_id)
-        except Exception:
-            logger.exception("Failed to record failure state for job %s", job_id)
+    def _record_status_during_failure(self, job_id: str, config: dict[str, Any]) -> None:
+        job = self._job_repo.get_job(job_id)
+        state = self._agent.get_state(config)
+        research_done = (
+            job is not None and job["research_done"]
+        ) or state.values.get("evidence") is not None
+
+        if research_done and job is not None:
+            if not job["research_done"]:
+                self._job_repo.mark_research_done(job_id)
+            self._job_repo.mark_halted(job_id)
+        else:
+            # No reusable research and the job won't be retried, so drop the
+            # partial checkpoint but keep the job record as FAILED so the client
+            # polling it learns the run failed instead of seeing it vanish.
+            delete_checkpoint_thread(job_id)
+            if job is not None:
+                self._job_repo.mark_failed(job_id)
 
 
 def get_blog_job_service() -> BlogJobService:

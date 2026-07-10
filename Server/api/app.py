@@ -82,7 +82,7 @@ app.add_middleware(
 
 # --- error handling ----------------------------------------------------------
 
-_DB_ERROR_DETAIL = "Something went wrong! Please retry shortly."
+_DB_ERROR_DETAIL = "Something went wrong!"
 
 
 @app.exception_handler(DBRepositoryError)
@@ -93,14 +93,14 @@ async def repository_error_handler(request: Request, exc: DBRepositoryError) -> 
     etc.) plus the underlying psycopg traceback, while returning a generic message
     to the client so driver internals never leak.
     """
-    logger.error(
-        "DB error on %s %s | operation=%s metadata=%s",
-        request.method,
-        request.url.path,
-        exc.operation,
-        exc.metadata,
-        exc_info=exc.original,
-    )
+    # logger.error(
+    #     "DB error on %s %s | operation=%s metadata=%s",
+    #     request.method,
+    #     request.url.path,
+    #     exc.operation,
+    #     exc.metadata,
+    #     exc_info=exc.original,
+    # )
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content=ErrorResponse(detail=_DB_ERROR_DETAIL).model_dump(),

@@ -1,6 +1,26 @@
 import { STAGES, stageIndex } from "../stages.js";
 
-export default function ProgressView({ job, onRetry, onBack }) {
+export default function ProgressView({ job, connectionLost, onRetry, onBack }) {
+  if (connectionLost) {
+    return (
+      <div className="progress-card fade-in">
+        <div className="halted-icon">📡</div>
+        <h2>We've lost contact with the server</h2>
+        <p className="progress-topic">“{job.topic}”</p>
+        <p className="halted-text">
+          We can no longer reach the server, so this generation can't be tracked
+          right now. It may have been interrupted. Check your library — if it was recoverable, you'll find it in the
+          Recoverable tab.
+        </p>
+        <div className="halted-actions">
+          <button className="ghost-btn" onClick={onBack}>
+            Start a new blog
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const failed = job.status === "FAILED";
 
   if (failed) {

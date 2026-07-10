@@ -15,6 +15,8 @@ import BlogView from "./components/BlogView.jsx";
 import Toasts from "./components/Toasts.jsx";
 
 const POLL_INTERVAL_MS = 3000;
+// Consecutive poll failures before we treat the server as unreachable (~12s).
+const POLL_MAX_FAILURES = 4;
 
 let toastSeq = 0;
 
@@ -27,6 +29,7 @@ export default function App() {
   const [blogLoading, setBlogLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [pollId, setPollId] = useState(null);
+  const [connectionLost, setConnectionLost] = useState(false);
   const [serverOk, setServerOk] = useState(null);
   const [toasts, setToasts] = useState([]);
 
@@ -89,14 +92,20 @@ export default function App() {
   const handlersRef = useRef({});
   handlersRef.current = { loadBlog, refreshJobs, addToast };
 
+  const pollFailuresRef = useRef(0);
+
   useEffect(() => {
     if (!pollId) return;
     let alive = true;
+    // Fresh run: clear any stale connection-lost state from a previous poll.
+    pollFailuresRef.current = 0;
+    setConnectionLost(false);
 
     const tick = async () => {
       try {
         const job = await getJob(pollId);
         if (!alive) return;
+        pollFailuresRef.current = 0;
         setActiveJob(job);
 
         if (job.status === "COMPLETE") {
@@ -113,9 +122,9 @@ export default function App() {
           handlersRef.current.refreshJobs();
         } else if (job.status === "FAILED") {
           setPollId(null);
-          jobs.map((job) => {
-            if (job.id === job.id) {
-              job.status = "FAILED";
+          jobs.map((_job) => {
+            if (_job.id === job.id) {
+              _job.status = "FAILED";
             }
           });
           setJobs(jobs);
@@ -125,7 +134,17 @@ export default function App() {
           );
         }
       } catch (e) {
-        if (alive) handlersRef.current.addToast("error", e.message);
+        if (!alive) return;
+        pollFailuresRef.current += 1;
+        // Toast only on the first failure so we don't spam it every 3s.
+        if (pollFailuresRef.current === 1) {
+          handlersRef.current.addToast("error", e.message);
+        }
+        // Sustained failure: stop hammering and surface a clear error state.
+        if (pollFailuresRef.current >= POLL_MAX_FAILURES) {
+          setConnectionLost(true);
+          setPollId(null);
+        }
       }
     };
 
@@ -179,6 +198,7 @@ export default function App() {
   };
 
   const handleSelect = (job) => {
+    setConnectionLost(false);
     setActiveJob(job);
     if (job.status === "COMPLETE") {
       loadBlog(job);
@@ -196,6 +216,7 @@ export default function App() {
     setActiveJob(null);
     setBlog(null);
     setPollId(null);
+    setConnectionLost(false);
   };
 
   // --- render ---------------------------------------------------------------
@@ -219,6 +240,7 @@ export default function App() {
         {view === "progress" && activeJob && (
           <ProgressView
             job={activeJob}
+            connectionLost={connectionLost}
             onRetry={handleRetry}
             onBack={handleNew}
           />
