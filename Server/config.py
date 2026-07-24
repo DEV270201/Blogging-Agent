@@ -32,6 +32,16 @@ POOL_MAX_SIZE = int(os.getenv("POOL_MAX_SIZE", "10"))
 API_MAX_WORKERS = int(os.getenv("API_MAX_WORKERS", "4"))
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
+
+# --- Job lease / heartbeat settings ---
+# A running worker refreshes its job's heartbeat on this cadence; if a job goes
+# LEASE_TIMEOUT seconds without a heartbeat it is considered orphaned (its owner
+# crashed) and is reclaimed. LEASE_TIMEOUT must be comfortably larger than the
+# heartbeat interval (~8x) so a few missed beats never falsely expire a live job.
+JOB_HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("JOB_HEARTBEAT_INTERVAL_SECONDS", "5"))
+JOB_LEASE_TIMEOUT_SECONDS = int(os.getenv("JOB_LEASE_TIMEOUT_SECONDS", "20"))
+# How often the background sweeper scans for orphaned (expired-lease) jobs.
+JOB_SWEEP_INTERVAL_SECONDS = int(os.getenv("JOB_SWEEP_INTERVAL_SECONDS", "10"))
 # Comma-separated list of origins allowed by CORS (the React client).
 CORS_ORIGINS = [
     origin.strip()

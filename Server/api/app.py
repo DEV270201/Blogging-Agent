@@ -7,6 +7,7 @@ or:
 """
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from uuid import UUID
@@ -16,7 +17,14 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from Server.config import API_HOST, API_MAX_WORKERS, API_PORT, CORS_ORIGINS
+from Server.config import (
+    API_HOST,
+    API_MAX_WORKERS,
+    API_PORT,
+    CORS_ORIGINS,
+    JOB_LEASE_TIMEOUT_SECONDS,
+    JOB_SWEEP_INTERVAL_SECONDS,
+)
 from Server.persistence.database import check_connection, close_pool
 from Server.persistence.job_repository import JOB_HALTED, DBRepositoryError
 from Server.services.blog_job_service import (
@@ -45,21 +53,61 @@ async def lifespan(app: FastAPI):
     # setup and creates the blog_jobs table. check_connection() then proves the DB
     # is actually reachable — if either step fails the app fails to start and never
     # accepts requests.
+    service: BlogJobService | None = None
     try:
         logger.info("Starting blog agent API...")
         service = get_blog_job_service()
         check_connection()
         logger.info("Database connected and schema ready.")
 
+        # Reconcile jobs orphaned by a previous crash before serving traffic.
+        # Lease-respecting, so this is safe even if a peer instance is live.
+        service.reclaim_expired_leases(JOB_LEASE_TIMEOUT_SECONDS)
+
         app.state.service = service
         app.state.executor = ThreadPoolExecutor(
             max_workers=API_MAX_WORKERS,
             thread_name_prefix="blog-job",
         )
+
+        # Background sweeper: periodically reclaim jobs whose lease has expired
+        # (a crashed peer, or a worker that never started). Daemon thread stopped
+        # via the event on shutdown.
+        stop_sweeper = threading.Event()
+
+        def _sweeper() -> None:
+            while not stop_sweeper.wait(JOB_SWEEP_INTERVAL_SECONDS):
+                try:
+                    logger.info("Sweeper thread running...")
+                    service.reclaim_expired_leases(JOB_LEASE_TIMEOUT_SECONDS)
+                except Exception:
+                    logger.exception("Lease sweep failed")
+
+        sweeper_thread = threading.Thread(
+            target=_sweeper, name="lease-sweeper", daemon=True
+        )
+        sweeper_thread.start()
+        app.state.stop_sweeper = stop_sweeper
+        app.state.sweeper_thread = sweeper_thread
+
         logger.info("Blog agent API ready (max_workers=%s).", API_MAX_WORKERS)
         yield
     finally:
-        app.state.executor.shutdown(wait=False, cancel_futures=True)
+        # Stop the sweeper, stop accepting/running jobs, then reconcile this
+        # instance's own in-flight jobs so a graceful restart recovers them
+        # immediately instead of waiting a full lease. close_pool() last.
+        stop_sweeper = getattr(app.state, "stop_sweeper", None)
+        if stop_sweeper is not None:
+            stop_sweeper.set()
+            app.state.sweeper_thread.join(timeout=5)
+        executor = getattr(app.state, "executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        if service is not None:
+            try:
+                service.reclaim_owner_jobs(service.instance_id)
+            except Exception:
+                logger.exception("Failed to reconcile own jobs on shutdown")
         close_pool()
         logger.info("Blog agent API shut down.")
 
@@ -181,13 +229,22 @@ def create_job(
 ) -> JobCreatedResponse:
     """Start generating a blog. Returns immediately with a job id to poll."""
     job_id = service.create(request.topic)
-    executor.submit(_run_job_in_background, service, job_id, request.topic)
+    try:
+        executor.submit(_run_job_in_background, service, job_id, request.topic)
+    except RuntimeError:
+        # Executor is shutting down and rejected the task. Reconcile the job we
+        # just created so it doesn't linger as a zombie IN-PROGRESS.
+        service.mark_interrupted(job_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is busy shutting down; please retry shortly.",
+        )
     job = service.get_job(job_id)
     return JobCreatedResponse(
         job_id=job_id,
         status=job["status"],
         stage=job["stage"],
-    ) 
+    )
 
 
 @app.get("/jobs", response_model=JobListResponse, tags=["jobs"])
@@ -265,7 +322,16 @@ def retry_job(
     # Flip to IN-PROGRESS synchronously so a client polling right after this
     # response never reads the stale HALTED status (which would stop its poll).
     service.prepare_retry(job_id_str)
-    executor.submit(_retry_job_in_background, service, job_id_str)
+    try:
+        executor.submit(_retry_job_in_background, service, job_id_str)
+    except RuntimeError:
+        # Executor rejected the task; revert the flip (mark_interrupted sees
+        # research_done and restores HALTED) so it stays recoverable.
+        service.mark_interrupted(job_id_str)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is busy shutting down; please retry shortly.",
+        )
     job = service.get_job(job_id_str)
     return JobCreatedResponse(
         job_id=job_id_str,

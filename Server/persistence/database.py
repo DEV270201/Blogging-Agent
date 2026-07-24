@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS blog_jobs (
     recoverable BOOLEAN NOT NULL DEFAULT FALSE,
     research_done BOOLEAN NOT NULL DEFAULT FALSE,
     final_blog_path TEXT,
+    owner_id TEXT,
+    heartbeat_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -31,6 +33,12 @@ BLOG_JOBS_STATUS_MIGRATION = (
     "ALTER TABLE blog_jobs DROP CONSTRAINT IF EXISTS blog_jobs_status_check;",
     "ALTER TABLE blog_jobs ADD CONSTRAINT blog_jobs_status_check "
     "CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED'));",
+)
+
+# Backfill lease/ownership columns for databases created before they existed.
+BLOG_JOBS_LEASE_MIGRATION = (
+    "ALTER TABLE blog_jobs ADD COLUMN IF NOT EXISTS owner_id TEXT;",
+    "ALTER TABLE blog_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;",
 )
 
 
@@ -55,6 +63,8 @@ def setup_job_table() -> None:
             cur.execute(BLOG_JOBS_SCHEMA)
             cur.execute(BLOG_JOBS_STAGE_MIGRATION)
             for statement in BLOG_JOBS_STATUS_MIGRATION:
+                cur.execute(statement)
+            for statement in BLOG_JOBS_LEASE_MIGRATION:
                 cur.execute(statement)
 
 

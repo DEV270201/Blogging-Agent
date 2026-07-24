@@ -1,10 +1,14 @@
 import logging
+import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from langgraph.graph.state import CompiledStateGraph
 
+from Server.config import JOB_HEARTBEAT_INTERVAL_SECONDS
 from Server.graph import build_blog_agent
 from Server.nodes.synthesizer import blog_output_path
 from Server.persistence.checkpointer import delete_checkpoint_thread, get_checkpointer
@@ -43,11 +47,19 @@ class BlogJobService:
     def __init__(self, agent: CompiledStateGraph, job_repo: JobRepository) -> None:
         self._agent = agent
         self._job_repo = job_repo
+        # Identifies this process as the owner of jobs it runs. A fresh id each
+        # start is fine: a dead process's jobs are reclaimed by lease expiry, not
+        # by matching an old id.
+        self._instance_id = str(uuid.uuid4())
+
+    @property
+    def instance_id(self) -> str:
+        return self._instance_id
 
     # -- creation / execution -------------------------------------------------
 
     def create(self, topic: str) -> str:
-        """Register a new job and return its id immediately (no generation yet)."""
+        """ Register a new job and return its id immediately (no generation yet)."""
         return self._job_repo.create_job(topic)
 
     def run(self, topic: str) -> str:
@@ -60,7 +72,9 @@ class BlogJobService:
         """Run the graph for an already-created job. Intended for background workers."""
         config = {"configurable": {"thread_id": job_id}}
         try:
-            self._execute_graph({"topic": topic}, config, job_id)
+            self._job_repo.claim_job(job_id, self._instance_id)
+            with self._heartbeat(job_id):
+                self._execute_graph({"topic": topic}, config, job_id)
             final_blog_path = self._resolve_blog_path(config)
             self._job_repo.mark_complete(job_id, final_blog_path)
         except Exception:
@@ -83,7 +97,9 @@ class BlogJobService:
         """
         config = {"configurable": {"thread_id": job_id}}
         try:
-            self._execute_graph(None, config, job_id)
+            self._job_repo.claim_job(job_id, self._instance_id)
+            with self._heartbeat(job_id):
+                self._execute_graph(None, config, job_id)
             final_blog_path = self._resolve_blog_path(config)
             self._job_repo.mark_complete(job_id, final_blog_path)
             return job_id
@@ -126,7 +142,72 @@ class BlogJobService:
 
         return {"content": content, "title": title, "path": path}
 
+    # -- reconciliation -------------------------------------------------------
+
+    def reclaim_expired_leases(self, lease_timeout_seconds: int) -> tuple[int, int]:
+        """Reconcile orphaned jobs (expired lease). Safe to run on any instance."""
+        halted, failed = self._job_repo.reclaim_expired_leases(lease_timeout_seconds)
+        if halted or failed:
+            logger.info(
+                "Reclaimed orphaned jobs: %s halted, %s failed", halted, failed
+            )
+        return halted, failed
+
+    def reclaim_owner_jobs(self, owner_id: str) -> tuple[int, int]:
+        """Reconcile this instance's own in-flight jobs (used on graceful shutdown)."""
+        halted, failed = self._job_repo.reclaim_owner_jobs(owner_id)
+        if halted or failed:
+            logger.info(
+                "Reconciled own in-flight jobs on shutdown: %s halted, %s failed",
+                halted,
+                failed,
+            )
+        return halted, failed
+
+    def mark_interrupted(self, job_id: str) -> None:
+        """Reconcile a single job that was flipped to IN-PROGRESS but never started
+        running (e.g. the executor rejected the task). Recoverable if research was
+        already done, otherwise failed — mirrors ``_handle_failure``."""
+        job = self._job_repo.get_job(job_id)
+        if job is None:
+            return
+        if job["research_done"]:
+            self._job_repo.mark_halted(job_id)
+        else:
+            self._job_repo.mark_failed(job_id)
+
     # -- internals ------------------------------------------------------------
+
+    @contextmanager
+    def _heartbeat(self, job_id: str) -> Iterator[None]:
+        """Renew a running job's lease on a background daemon thread.
+
+        A single graph node can block the worker thread for minutes, so the
+        worker cannot renew its own lease mid-node. This companion thread bumps
+        the heartbeat every ``JOB_HEARTBEAT_INTERVAL_SECONDS`` independently, and
+        is stopped and joined when the ``with`` block exits.
+        """
+        stop = threading.Event()
+
+        def _beat() -> None:
+            while not stop.wait(JOB_HEARTBEAT_INTERVAL_SECONDS):
+                try:
+                    logger.info(f"Heartbeat sending for JOB ID: {job_id}")
+                    self._job_repo.mark_heartbeat(job_id)
+                except Exception:
+                    logger.warning(
+                        "Heartbeat failed for job %s", job_id, exc_info=True
+                    )
+
+        thread = threading.Thread(
+            target=_beat, name=f"hb-{job_id}", daemon=True
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=2)
 
     def _execute_graph(
         self,

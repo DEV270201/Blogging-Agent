@@ -80,8 +80,9 @@ class JobRepository:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO blog_jobs (id, topic, status, stage, recoverable, research_done)
-                        VALUES (%s, %s, %s, %s, FALSE, FALSE)
+                        INSERT INTO blog_jobs
+                            (id, topic, status, stage, recoverable, research_done, heartbeat_at)
+                        VALUES (%s, %s, %s, %s, FALSE, FALSE, NOW())
                         """,
                         (job_id, topic, JOB_IN_PROGRESS, STAGE_QUEUED),
                     )
@@ -213,11 +214,112 @@ class JobRepository:
                         SET status = %s,
                             stage = %s,
                             recoverable = FALSE,
+                            owner_id = NULL,
+                            heartbeat_at = NOW(),
                             updated_at = NOW()
                         WHERE id = %s
                         """,
                         (JOB_IN_PROGRESS, STAGE_QUEUED, job_id),
                     )
+
+    def claim_job(self, job_id: str, owner_id: str) -> None:
+        """Stamp a job with the worker/instance that is now running it and start
+        its lease. Called by the worker as it begins execution."""
+        with _guard("claim_job", job_id=job_id, owner_id=owner_id):
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET owner_id = %s,
+                            heartbeat_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (owner_id, job_id),
+                    )
+
+    def mark_heartbeat(self, job_id: str) -> None:
+        """Renew a running job's lease. No-op if the job is no longer IN-PROGRESS."""
+        with _guard("mark_heartbeat", job_id=job_id):
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET heartbeat_at = NOW()
+                        WHERE id = %s AND status = %s
+                        """,
+                        (job_id, JOB_IN_PROGRESS),
+                    )
+
+    def reclaim_expired_leases(self, lease_timeout_seconds: int) -> tuple[int, int]:
+        """Reconcile jobs whose lease expired (owner presumed dead).
+
+        Only touches IN-PROGRESS rows with a stale/absent heartbeat, so a live
+        owner that keeps its heartbeat fresh is never disturbed — this is what
+        makes reconciliation safe with multiple instances. Returns
+        ``(halted_count, failed_count)``.
+        """
+        with _guard("reclaim_expired_leases", lease=lease_timeout_seconds):
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET status = %s, stage = %s, recoverable = TRUE,
+                            owner_id = NULL, updated_at = NOW()
+                        WHERE status = %s AND research_done = TRUE
+                          AND (heartbeat_at IS NULL
+                               OR heartbeat_at < NOW() - make_interval(secs => %s))
+                        """,
+                        (JOB_HALTED, STAGE_HALTED, JOB_IN_PROGRESS, lease_timeout_seconds),
+                    )
+                    halted = cur.rowcount
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET status = %s, stage = %s, recoverable = FALSE,
+                            owner_id = NULL, updated_at = NOW()
+                        WHERE status = %s AND research_done = FALSE
+                          AND (heartbeat_at IS NULL
+                               OR heartbeat_at < NOW() - make_interval(secs => %s))
+                        """,
+                        (JOB_FAILED, STAGE_FAILED, JOB_IN_PROGRESS, lease_timeout_seconds),
+                    )
+                    failed = cur.rowcount
+        return halted, failed
+
+    def reclaim_owner_jobs(self, owner_id: str) -> tuple[int, int]:
+        """Reconcile all IN-PROGRESS jobs owned by ``owner_id`` regardless of
+        heartbeat. Used on graceful shutdown so this instance's in-flight jobs
+        are recovered immediately instead of waiting for their leases to expire.
+        Returns ``(halted_count, failed_count)``.
+        """
+        with _guard("reclaim_owner_jobs", owner_id=owner_id):
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET status = %s, stage = %s, recoverable = TRUE,
+                            owner_id = NULL, updated_at = NOW()
+                        WHERE status = %s AND research_done = TRUE AND owner_id = %s
+                        """,
+                        (JOB_HALTED, STAGE_HALTED, JOB_IN_PROGRESS, owner_id),
+                    )
+                    halted = cur.rowcount
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET status = %s, stage = %s, recoverable = FALSE,
+                            owner_id = NULL, updated_at = NOW()
+                        WHERE status = %s AND research_done = FALSE AND owner_id = %s
+                        """,
+                        (JOB_FAILED, STAGE_FAILED, JOB_IN_PROGRESS, owner_id),
+                    )
+                    failed = cur.rowcount
+        return halted, failed
 
     def delete_job(self, job_id: str) -> None:
         with _guard("delete_job", job_id=job_id):
