@@ -26,7 +26,11 @@ from Server.config import (
     JOB_SWEEP_INTERVAL_SECONDS,
 )
 from Server.persistence.database import check_connection, close_pool
-from Server.persistence.job_repository import JOB_HALTED, DBRepositoryError
+from Server.persistence.job_repository import (
+    JOB_AWAITING_INPUT,
+    JOB_HALTED,
+    DBRepositoryError,
+)
 from Server.services.blog_job_service import (
     BlogJobService,
     get_blog_job_service,
@@ -34,11 +38,13 @@ from Server.services.blog_job_service import (
 from Server.api.schemas import (
     BlogContentResponse,
     CreateJobRequest,
+    DecisionRequest,
     ErrorResponse,
     HealthResponse,
     JobCreatedResponse,
     JobListResponse,
     JobStatusResponse,
+    ResearchReviewResponse,
 )
 
 logger = logging.getLogger("blog_agent.api")
@@ -200,6 +206,15 @@ def _retry_job_in_background(service: BlogJobService, job_id: str) -> None:
         logger.exception("Blog retry failed for job %s", job_id)
 
 
+def _decision_job_in_background(
+    service: BlogJobService, job_id: str, decision: str
+) -> None:
+    try:
+        service.submit_decision(job_id, decision)
+    except Exception:
+        logger.exception("Blog decision resume failed for job %s", job_id)
+
+
 # --- routes ------------------------------------------------------------------
 
 
@@ -328,6 +343,78 @@ def retry_job(
         # Executor rejected the task; revert the flip (mark_interrupted sees
         # research_done and restores HALTED) so it stays recoverable.
         service.mark_interrupted(job_id_str)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is busy shutting down; please retry shortly.",
+        )
+    job = service.get_job(job_id_str)
+    return JobCreatedResponse(
+        job_id=job_id_str,
+        status=job["status"],
+        stage=job["stage"],
+    )
+
+
+@app.get("/jobs/{job_id}/review", response_model=ResearchReviewResponse, tags=["jobs"])
+def get_job_review(
+    job_id: UUID,
+    service: BlogJobService = Depends(get_service),
+) -> ResearchReviewResponse:
+    """Fetch the pending research-review for a job paused after planning."""
+    result = service.get_pending_review(str(job_id))
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if not result.get("pending"):
+        return ResearchReviewResponse(job_id=str(job_id), pending=False)
+    payload = result["payload"]
+    return ResearchReviewResponse(
+        job_id=str(job_id),
+        pending=True,
+        coverage=payload.get("coverage"),
+        title=payload.get("title"),
+        sections=payload.get("sections", []),
+        research_note=payload.get("research_note", "") or "",
+        evidence_count=payload.get("evidence_count", 0),
+        attempts=payload.get("attempts", 0),
+        max_attempts=payload.get("max_attempts", 0),
+        sources=payload.get("sources", []),
+    )
+
+
+@app.post(
+    "/jobs/{job_id}/decision",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["jobs"],
+)
+def submit_decision(
+    job_id: UUID,
+    request: DecisionRequest,
+    service: BlogJobService = Depends(get_service),
+    executor: ThreadPoolExecutor = Depends(get_executor),
+) -> JobCreatedResponse:
+    """Resume a paused job with the user's research-review decision."""
+    job_id_str = str(job_id)
+    job = service.get_job(job_id_str)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job["status"] != JOB_AWAITING_INPUT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Job is not awaiting a decision",
+        )
+
+    # Flip to IN-PROGRESS synchronously so a client polling right after this
+    # response never reads the stale AWAITING_INPUT status.
+    service.prepare_decision(job_id_str)
+    try:
+        executor.submit(
+            _decision_job_in_background, service, job_id_str, request.decision
+        )
+    except RuntimeError:
+        # Executor rejected the task; restore AWAITING_INPUT so the decision can
+        # be submitted again once the server is healthy.
+        service.restore_awaiting_input(job_id_str)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Server is busy shutting down; please retry shortly.",

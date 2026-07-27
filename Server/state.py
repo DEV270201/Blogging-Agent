@@ -98,3 +98,9 @@ class BlogState(TypedDict):
     evidence: EvidencePack
     sections: Annotated[list[str], operator.add]
     final_blog: str
+    # Human-in-the-loop research review. Both are optional at runtime (the graph
+    # is seeded with only {"topic": ...}); always read them via state.get(...).
+    # research_attempts counts user-triggered re-research rounds; research_decision
+    # carries the last gate decision ("proceed" | "redo") for routing.
+    research_attempts: int
+    research_decision: str

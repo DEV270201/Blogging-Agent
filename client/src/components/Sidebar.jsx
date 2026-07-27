@@ -49,11 +49,25 @@ export default function Sidebar({
   onNew,
   serverOk,
 }) {
-  const library = jobs.filter((j) => j.status !== "HALTED");
+  // Library = finished / in-progress blogs. Action-needed states each get their
+  // own surfaced tab so they aren't lost in the pool: paused jobs waiting on a
+  // research-review decision, and crashed jobs that can be resumed.
+  const library = jobs.filter(
+    (j) => j.status !== "HALTED" && j.status !== "AWAITING_INPUT"
+  );
+  const needsInput = jobs.filter((j) => j.status === "AWAITING_INPUT");
   const recoverable = jobs.filter(
     (j) => j.status === "HALTED" && j.recoverable
   );
-  const list = tab === "library" ? library : recoverable;
+  const list =
+    tab === "library" ? library : tab === "needsInput" ? needsInput : recoverable;
+
+  const emptyMessage =
+    tab === "library"
+      ? "No blogs yet. Create your first one!"
+      : tab === "needsInput"
+      ? "Nothing waiting on you right now. 👍"
+      : "Nothing to recover — all clear. 🎉";
 
   return (
     <aside className="sidebar">
@@ -85,6 +99,15 @@ export default function Sidebar({
           <span className="tab-badge">{library.length}</span>
         </button>
         <button
+          className={`tab ${tab === "needsInput" ? "active" : ""}`}
+          onClick={() => setTab("needsInput")}
+        >
+          Needs input
+          {needsInput.length > 0 && (
+            <span className="tab-badge alert">{needsInput.length}</span>
+          )}
+        </button>
+        <button
           className={`tab ${tab === "recoverable" ? "active" : ""}`}
           onClick={() => setTab("recoverable")}
         >
@@ -97,11 +120,7 @@ export default function Sidebar({
 
       <div className="job-list">
         {list.length === 0 ? (
-          <div className="empty">
-            {tab === "library"
-              ? "No blogs yet. Create your first one!"
-              : "Nothing to recover — all clear. 🎉"}
-          </div>
+          <div className="empty">{emptyMessage}</div>
         ) : (
           list.map((job) => (
             <JobCard

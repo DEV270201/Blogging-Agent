@@ -27,6 +27,13 @@ DATABASE_URI = os.getenv("DATABASE_URI")
 POOL_MIN_SIZE = int(os.getenv("POOL_MIN_SIZE", "1"))
 POOL_MAX_SIZE = int(os.getenv("POOL_MAX_SIZE", "10"))
 
+# --- Human-in-the-loop research review ---
+# When research coverage comes back weak (partial/insufficient) the graph pauses
+# and asks the user whether to proceed or re-research. This caps how many
+# user-triggered re-research rounds are allowed before the agent auto-proceeds
+# with whatever evidence exists, so a job can never loop forever.
+RESEARCH_RETRY_CAP = int(os.getenv("RESEARCH_RETRY_CAP", "2"))
+
 # --- API server settings ---
 # Number of blog-generation jobs that may run concurrently in the API process.
 API_MAX_WORKERS = int(os.getenv("API_MAX_WORKERS", "4"))

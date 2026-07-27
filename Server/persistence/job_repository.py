@@ -36,12 +36,16 @@ JOB_IN_PROGRESS = "IN-PROGRESS"
 JOB_COMPLETE = "COMPLETE"
 JOB_HALTED = "HALTED"
 JOB_FAILED = "FAILED"
+# Paused waiting on human input (the research-review gate). Not IN-PROGRESS, so
+# the lease sweeper never reclaims it — it waits indefinitely for the user.
+JOB_AWAITING_INPUT = "AWAITING_INPUT"
 
 # Fine-grained progress stages, surfaced to the client while a job runs.
 STAGE_QUEUED = "queued"
 STAGE_GENERATING_QUERIES = "generating_queries"
 STAGE_RESEARCHING = "researching"
 STAGE_PLANNING = "planning"
+STAGE_AWAITING_INPUT = "awaiting_input"
 STAGE_WRITING_SECTIONS = "writing_sections"
 STAGE_SYNTHESIZING = "synthesizing"
 STAGE_COMPLETE = "complete"
@@ -202,6 +206,30 @@ class JobRepository:
                         WHERE id = %s
                         """,
                         (JOB_FAILED, STAGE_FAILED, job_id),
+                    )
+
+    def mark_awaiting_input(self, job_id: str) -> None:
+        """Pause a job waiting on the user's research-review decision.
+
+        Marked recoverable and left out of IN-PROGRESS, so the lease sweeper
+        ignores it — the job waits indefinitely (durable in the checkpoint) until
+        the user submits a decision. owner_id is cleared since no worker is
+        actively running it.
+        """
+        with _guard("mark_awaiting_input", job_id=job_id):
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE blog_jobs
+                        SET status = %s,
+                            stage = %s,
+                            recoverable = TRUE,
+                            owner_id = NULL,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (JOB_AWAITING_INPUT, STAGE_AWAITING_INPUT, job_id),
                     )
 
     def mark_in_progress(self, job_id: str) -> None:

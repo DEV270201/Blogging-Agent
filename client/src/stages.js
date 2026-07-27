@@ -51,6 +51,7 @@ export const STATUS_META = {
   COMPLETE: { label: "Complete", className: "complete" },
   HALTED: { label: "Halted", className: "halted" },
   FAILED: { label: "Failed", className: "failed" },
+  AWAITING_INPUT: { label: "Needs your input", className: "review" },
 };
 
 export function formatDate(iso) {

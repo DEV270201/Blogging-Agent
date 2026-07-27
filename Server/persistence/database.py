@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS blog_jobs (
     id UUID PRIMARY KEY,
     topic TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'IN-PROGRESS'
-        CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED')),
+        CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED', 'AWAITING_INPUT')),
     stage TEXT NOT NULL DEFAULT 'queued',
     recoverable BOOLEAN NOT NULL DEFAULT FALSE,
     research_done BOOLEAN NOT NULL DEFAULT FALSE,
@@ -26,13 +26,14 @@ BLOG_JOBS_STAGE_MIGRATION = (
     "ALTER TABLE blog_jobs ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'queued';"
 )
 
-# Widen the status check constraint for databases created before 'FAILED' existed.
-# Kept as separate statements: the pool prepares every statement (prepare_threshold=0)
-# and a prepared statement cannot carry more than one command.
+# Widen the status check constraint for databases created before newer statuses
+# ('FAILED', 'AWAITING_INPUT') existed. Kept as separate statements: the pool
+# prepares every statement (prepare_threshold=0) and a prepared statement cannot
+# carry more than one command.
 BLOG_JOBS_STATUS_MIGRATION = (
     "ALTER TABLE blog_jobs DROP CONSTRAINT IF EXISTS blog_jobs_status_check;",
     "ALTER TABLE blog_jobs ADD CONSTRAINT blog_jobs_status_check "
-    "CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED'));",
+    "CHECK (status IN ('IN-PROGRESS', 'COMPLETE', 'HALTED', 'FAILED', 'AWAITING_INPUT'));",
 )
 
 # Backfill lease/ownership columns for databases created before they existed.

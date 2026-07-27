@@ -65,6 +65,18 @@ export function retryJob(jobId) {
   return request(`/jobs/${jobId}/retry`, { method: "POST" });
 }
 
+export function getReview(jobId) {
+  return request(`/jobs/${jobId}/review`, { method: "GET" });
+}
+
+export function submitDecision(jobId, decision) {
+  return request(`/jobs/${jobId}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+}
+
 export function listJobs(limit = 100, offset = 0) {
   return request(`/jobs?limit=${limit}&offset=${offset}`, { method: "GET" });
 }

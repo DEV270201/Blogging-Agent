@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
 from Server.config import JOB_HEARTBEAT_INTERVAL_SECONDS
 from Server.graph import build_blog_agent
@@ -14,6 +15,7 @@ from Server.nodes.synthesizer import blog_output_path
 from Server.persistence.checkpointer import delete_checkpoint_thread, get_checkpointer
 from Server.persistence.database import get_pool
 from Server.persistence.job_repository import (
+    JOB_AWAITING_INPUT,
     JOB_HALTED,
     STAGE_GENERATING_QUERIES,
     STAGE_PLANNING,
@@ -74,9 +76,8 @@ class BlogJobService:
         try:
             self._job_repo.claim_job(job_id, self._instance_id)
             with self._heartbeat(job_id):
-                self._execute_graph({"topic": topic}, config, job_id)
-            final_blog_path = self._resolve_blog_path(config)
-            self._job_repo.mark_complete(job_id, final_blog_path)
+                interrupted = self._execute_graph({"topic": topic}, config, job_id)
+            self._finalize(job_id, config, interrupted)
         except Exception:
             self._handle_failure(job_id, config)
             raise
@@ -94,18 +95,52 @@ class BlogJobService:
         """Resume a halted, recoverable job from its last checkpoint.
 
         Assumes the job was already flipped to IN-PROGRESS via ``prepare_retry``.
+        A halted job may be sitting on the research-review interrupt (e.g. it
+        crashed in the pause window); resuming with ``None`` re-hits the
+        interrupt, and ``_finalize`` sends it back to AWAITING_INPUT rather than
+        completing a blog-less job.
         """
         config = {"configurable": {"thread_id": job_id}}
         try:
             self._job_repo.claim_job(job_id, self._instance_id)
             with self._heartbeat(job_id):
-                self._execute_graph(None, config, job_id)
-            final_blog_path = self._resolve_blog_path(config)
-            self._job_repo.mark_complete(job_id, final_blog_path)
+                interrupted = self._execute_graph(None, config, job_id)
+            self._finalize(job_id, config, interrupted)
             return job_id
         except Exception:
             self._handle_failure(job_id, config)
             raise
+
+    def prepare_decision(self, job_id: str) -> None:
+        """Flip an awaiting-input job to in-progress synchronously, in the request
+        thread — mirrors ``prepare_retry`` so a client polling right after the
+        decision call never reads the stale AWAITING_INPUT status."""
+        self._job_repo.mark_in_progress(job_id)
+
+    def submit_decision(self, job_id: str, decision: str) -> str:
+        """Resume a paused job with the user's research-review decision.
+
+        Assumes the job was already flipped to IN-PROGRESS via
+        ``prepare_decision``. ``decision`` is "proceed" or "redo"; a "redo" that
+        still yields weak coverage re-interrupts and returns to AWAITING_INPUT.
+        """
+        config = {"configurable": {"thread_id": job_id}}
+        try:
+            self._job_repo.claim_job(job_id, self._instance_id)
+            with self._heartbeat(job_id):
+                interrupted = self._execute_graph(
+                    Command(resume=decision), config, job_id
+                )
+            self._finalize(job_id, config, interrupted)
+            return job_id
+        except Exception:
+            self._handle_failure(job_id, config)
+            raise
+
+    def restore_awaiting_input(self, job_id: str) -> None:
+        """Revert a job back to AWAITING_INPUT (used when the executor rejects a
+        decision task after ``prepare_decision`` already flipped it to IN-PROGRESS)."""
+        self._job_repo.mark_awaiting_input(job_id)
 
     # -- reads ----------------------------------------------------------------
 
@@ -141,6 +176,28 @@ class BlogJobService:
             content = state.values.get("final_blog")
 
         return {"content": content, "title": title, "path": path}
+
+    def get_pending_review(self, job_id: str) -> dict[str, Any] | None:
+        """Return the pending research-review payload for a paused job.
+
+        Returns ``None`` if the job does not exist, or ``{"pending": False}`` if
+        it is not awaiting input. When paused, returns
+        ``{"pending": True, "payload": <interrupt value>}`` read from the
+        checkpointed interrupt.
+        """
+        job = self._job_repo.get_job(job_id)
+        if job is None:
+            return None
+        if job["status"] != JOB_AWAITING_INPUT:
+            return {"pending": False}
+
+        config = {"configurable": {"thread_id": job_id}}
+        snapshot = self._agent.get_state(config)
+        for task in snapshot.tasks:
+            interrupts = getattr(task, "interrupts", None) or ()
+            if interrupts:
+                return {"pending": True, "payload": interrupts[0].value}
+        return {"pending": False}
 
     # -- reconciliation -------------------------------------------------------
 
@@ -211,29 +268,90 @@ class BlogJobService:
 
     def _execute_graph(
         self,
-        input_state: dict[str, str] | None,
+        input_state: dict[str, str] | Command | None,
         config: dict[str, Any],
         job_id: str,
-    ) -> None:
-        # Seed the starting stage. On resume (input_state is None) skip ahead if
-        # research already finished so the client does not briefly see an earlier stage.
-        initial_stage = STAGE_GENERATING_QUERIES
-        if input_state is None:
+    ) -> bool:
+        """Stream the graph, mapping node updates to job stages. Returns True if
+        the run paused on a human-in-the-loop interrupt (research review)."""
+        # Seed the starting stage so the client never briefly sees a stale one.
+        #  - fresh run: starts at query generation.
+        #  - "redo" decision: loops the graph BACK to queries_generator, so it
+        #    also starts at query generation (research_done stays True in the DB
+        #    but the graph is genuinely re-researching).
+        #  - proceed / retry: research already finished, continue from planning.
+        is_fresh = isinstance(input_state, dict)
+        resume_value = (
+            input_state.resume if isinstance(input_state, Command) else None
+        )
+        if is_fresh or resume_value == "redo":
+            initial_stage = STAGE_GENERATING_QUERIES
+        else:
             job = self._job_repo.get_job(job_id)
-            if job is not None and job["research_done"]:
-                initial_stage = STAGE_PLANNING
+            initial_stage = (
+                STAGE_PLANNING
+                if job is not None and job["research_done"]
+                else STAGE_GENERATING_QUERIES
+            )
         self._job_repo.update_stage(job_id, initial_stage)
         print(f"Initial stage: {initial_stage}")
+
+        # How many sections (parallel workers) to expect, so we can tell when
+        # drafting is done and the synthesizer takes over. On a resume the plan
+        # already exists in the checkpoint, so read it once up front (a plain read
+        # before the stream — never mid-stream, which would re-enter the
+        # checkpointer). On a fresh run it's captured from the orchestrator update
+        # below; a "redo" that re-plans also refreshes it there.
+        is_resume = not is_fresh
+        expected_workers: int | None = (
+            self._plan_task_count(config) if is_resume else None
+        )
+        workers_seen = 0
+        interrupted = False
         for chunk in self._agent.stream(input_state, config, stream_mode="updates"):
             if "queries_generator" in chunk:
                 self._job_repo.update_stage(job_id, STAGE_RESEARCHING)
             if "research_node" in chunk:
                 self._job_repo.mark_research_done(job_id)
                 self._job_repo.update_stage(job_id, STAGE_PLANNING)
+            # Freshly (re)built plan — refresh the expected section count from it.
             if "orchestrator" in chunk:
-                self._job_repo.update_stage(job_id, STAGE_WRITING_SECTIONS)
-            if "synthesizer" in chunk:
+                count = self._task_count_from_plan(
+                    (chunk["orchestrator"] or {}).get("plan")
+                )
+                if count:
+                    expected_workers = count
+            # The review gate returning "proceed" is where drafting begins — the
+            # workers fan out immediately after. Set writing_sections here (not on
+            # a worker update, which fires only *after* a section finishes).
+            # "redo" loops back instead, so it must not flip the stage forward.
+            if "review_gate" in chunk:
+                if (chunk["review_gate"] or {}).get("research_decision") == "proceed":
+                    self._job_repo.update_stage(job_id, STAGE_WRITING_SECTIONS)
+            # Workers run in parallel: one "worker" update per section. Once every
+            # expected section is written, the synthesizer is what runs next.
+            if "worker" in chunk:
+                workers_seen += 1
+                if expected_workers and workers_seen >= expected_workers:
+                    self._job_repo.update_stage(job_id, STAGE_SYNTHESIZING)
+            # Fallback: if the section count couldn't be resolved, at least flip to
+            # synthesizing when the synthesizer reports (mark_complete follows).
+            if "synthesizer" in chunk and not expected_workers:
                 self._job_repo.update_stage(job_id, STAGE_SYNTHESIZING)
+            if "__interrupt__" in chunk:
+                # The graph paused at the research-review gate; the stream ends
+                # right after this chunk. Caller flips the job to AWAITING_INPUT.
+                interrupted = True
+        return interrupted
+
+    def _finalize(self, job_id: str, config: dict[str, Any], interrupted: bool) -> None:
+        """Single completion path shared by execute/retry/submit_decision so no
+        run can mark a job COMPLETE when it actually paused on an interrupt."""
+        if interrupted:
+            self._job_repo.mark_awaiting_input(job_id)
+            return
+        final_blog_path = self._resolve_blog_path(config)
+        self._job_repo.mark_complete(job_id, final_blog_path)
 
     def _resolve_blog_path(self, config: dict[str, Any]) -> str | None:
         state = self._agent.get_state(config)
@@ -254,6 +372,27 @@ class BlogJobService:
         if isinstance(plan, dict):
             return plan.get("blog_title")
         return None
+
+    def _plan_task_count(self, config: dict[str, Any]) -> int | None:
+        """Section (parallel-worker) count from the checkpointed plan. Called once
+        before a resume stream — a plain read, never mid-stream (which would
+        re-enter the checkpointer)."""
+        try:
+            plan = self._agent.get_state(config).values.get("plan")
+        except Exception:
+            return None
+        return self._task_count_from_plan(plan)
+
+    @staticmethod
+    def _task_count_from_plan(plan: Any) -> int | None:
+        """Number of sections in a plan, whether it's a live Plan object or a
+        dict reloaded from a checkpoint."""
+        if plan is None:
+            return None
+        tasks = getattr(plan, "tasks", None)
+        if tasks is None and isinstance(plan, dict):
+            tasks = plan.get("tasks")
+        return len(tasks) if tasks else None
 
     def _handle_failure(self, job_id: str, config: dict[str, Any]) -> None:
         # Runs while handling an already-failed run. Recording the terminal status

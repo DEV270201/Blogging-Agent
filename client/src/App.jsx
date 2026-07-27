@@ -5,8 +5,10 @@ import {
   getBlog,
   getHealth,
   getJob,
+  getReview,
   listJobs,
   retryJob,
+  submitDecision,
 } from "./api.js";
 import Sidebar from "./components/Sidebar.jsx";
 import BlogForm from "./components/BlogForm.jsx";
@@ -25,6 +27,7 @@ export default function App() {
   const [tab, setTab] = useState("library");
   const [view, setView] = useState("create"); // "create" | "progress" | "blog"
   const [activeJob, setActiveJob] = useState(null);
+  const [review, setReview] = useState(null);
   const [blog, setBlog] = useState(null);
   const [blogLoading, setBlogLoading] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -87,10 +90,35 @@ export default function App() {
     [addToast]
   );
 
+  // Fetch the pending research-review for a paused job. Kept separate from the
+  // poll loop (like loadBlog) so its setReview isn't gated by the poll effect's
+  // `alive` flag — the poll stops the moment it sees AWAITING_INPUT, which would
+  // otherwise cancel an inline fetch before it could set state.
+  //
+  // reviewReqRef tracks which job's review the user currently wants, giving
+  // "last-request-wins" semantics: if they switch jobs (or navigate away) while
+  // a fetch is in flight, the stale response is dropped instead of overwriting
+  // the current review. A ref (not the poll's `alive` flag) is used because it
+  // survives re-renders and is tied to the user's selection, not the effect.
+  const reviewReqRef = useRef(null);
+  const loadReview = useCallback(
+    async (job) => {
+      reviewReqRef.current = job.id;
+      try {
+        const r = await getReview(job.id);
+        if (reviewReqRef.current !== job.id) return; // superseded
+        if (r.pending) setReview(r);
+      } catch (e) {
+        if (reviewReqRef.current === job.id) addToast("error", e.message);
+      }
+    },
+    [addToast]
+  );
+
   // --- polling --------------------------------------------------------------
   // Keep a ref to the latest callbacks so the interval always sees fresh state.
   const handlersRef = useRef({});
-  handlersRef.current = { loadBlog, refreshJobs, addToast };
+  handlersRef.current = { loadBlog, loadReview, refreshJobs, addToast };
 
   const pollFailuresRef = useRef(0);
 
@@ -113,6 +141,13 @@ export default function App() {
           handlersRef.current.addToast("success", "Your blog is ready! 🎉");
           handlersRef.current.refreshJobs();
           handlersRef.current.loadBlog(job);
+        } else if (job.status === "AWAITING_INPUT") {
+          // Paused at the research-review gate. Stop polling and load the
+          // pending review so the user can proceed or re-research. loadReview
+          // runs outside the `alive` guard so stopping the poll doesn't cancel it.
+          setPollId(null);
+          handlersRef.current.loadReview(job);
+          handlersRef.current.refreshJobs();
         } else if (job.status === "HALTED") {
           setPollId(null);
           handlersRef.current.addToast(
@@ -170,6 +205,8 @@ export default function App() {
         created_at: new Date().toISOString(),
       };
       setActiveJob(job);
+      setReview(null);
+      reviewReqRef.current = null;
       setBlog(null);
       setView("progress");
       setTab("library");
@@ -185,6 +222,8 @@ export default function App() {
   const handleRetry = async (job) => {
     try {
       await retryJob(job.id);
+      setReview(null);
+      reviewReqRef.current = null;
       setActiveJob({ ...job, status: "IN-PROGRESS", stage: "queued" });
       setBlog(null);
       setView("progress");
@@ -197,14 +236,39 @@ export default function App() {
     }
   };
 
+  const handleDecision = async (job, decision) => {
+    try {
+      await submitDecision(job.id, decision);
+      setReview(null);
+      reviewReqRef.current = null;
+      setActiveJob({ ...job, status: "IN-PROGRESS", stage: "planning" });
+      setBlog(null);
+      setView("progress");
+      setPollId(job.id);
+      addToast(
+        "info",
+        decision === "redo" ? "Researching again…" : "Continuing with current research…"
+      );
+      refreshJobs();
+    } catch (e) {
+      addToast("error", e.message);
+    }
+  };
+
   const handleSelect = (job) => {
     setConnectionLost(false);
     setActiveJob(job);
+    setReview(null);
+    reviewReqRef.current = null;
     if (job.status === "COMPLETE") {
       loadBlog(job);
     } else if (job.status === "IN-PROGRESS") {
       setView("progress");
       setPollId(job.id);
+    } else if (job.status === "AWAITING_INPUT") {
+      // Re-open the pending research-review for a paused job.
+      setView("progress");
+      loadReview(job);
     } else {
       // HALTED selected from the recoverable tab
       setView("progress");
@@ -214,6 +278,8 @@ export default function App() {
   const handleNew = () => {
     setView("create");
     setActiveJob(null);
+    setReview(null);
+    reviewReqRef.current = null;
     setBlog(null);
     setPollId(null);
     setConnectionLost(false);
@@ -240,8 +306,10 @@ export default function App() {
         {view === "progress" && activeJob && (
           <ProgressView
             job={activeJob}
+            review={review}
             connectionLost={connectionLost}
             onRetry={handleRetry}
+            onDecision={handleDecision}
             onBack={handleNew}
           />
         )}
