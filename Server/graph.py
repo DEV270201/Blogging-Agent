@@ -15,11 +15,15 @@ from Server.nodes import (
 from Server.state import BlogState
 
 TRANSIENT_RETRY = RetryPolicy(
-    max_attempts=2,
-    initial_interval=1.0,
+    max_attempts=3,
+    initial_interval=5.0,
     backoff_factor=2.0,
 )
-SYNTHESIZER_RETRY = RetryPolicy(max_attempts=2, initial_interval=1.0)
+SYNTHESIZER_RETRY = RetryPolicy(
+    max_attempts=3,
+    initial_interval=5.0,
+    backoff_factor=2.0,
+)
 
 
 def build_blog_agent(checkpointer: BaseCheckpointSaver):

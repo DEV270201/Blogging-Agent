@@ -1,0 +1,54 @@
+name: Pull request — test server before merge
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  blog-main-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for server or test changes
+        id: check
+        run: |
+          if git diff --name-only ${{ github.event.pull_request.base.sha || 'HEAD~1' }} ${{ github.sha }} | grep -qE '^(Server/|tests/|\.github/workflows/)'; then
+            echo "Server or test files changed, continuing..."
+            echo "SKIP=false" >> "$GITHUB_ENV"
+          else
+            echo "No server or test changes, skipping remaining steps."
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up uv
+        if: env.SKIP != 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: env.SKIP != 'true'
+        run: uv sync --frozen --group test
+
+      - name: Run tests
+        if: env.SKIP != 'true'
+        run: uv run pytest tests/ -v 2>&1 | tee test-output.log
+        continue-on-error: true
+        id: run-tests
+
+      - name: Add test results to summary
+        if: env.SKIP != 'true'
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat test-output.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail job if tests failed
+        if: env.SKIP != 'true' && steps.run-tests.outcome == 'failure'
+        run: exit 1
