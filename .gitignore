@@ -13,3 +13,4 @@ wheels/
 # Server/blogs/
 thinking_to_add_improvements.txt
 .env
+Server/blogs/*
