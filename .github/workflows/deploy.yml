@@ -26,7 +26,7 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHub_OIDC_Role_Blog_Agent_Main
           aws-region: ${{ secrets.AWS_REGION }}
-          audience: sts.amazonaws.com.cn
+          audience: sts.amazonaws.com
 
       - name: Login to AWS ECR
         id: login-ecr
