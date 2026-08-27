@@ -160,4 +160,4 @@ Every feature or change ships with the corresponding test update in the same ses
 - **`Plan` may be a Pydantic object or a plain dict** after checkpoint reload — use the `_attr` / `_task_count_from_plan` helpers.
 - **Resume via `Command(resume=...)` or `None`, never `update_state`.**
 - Run all backend commands from repo root (absolute `Server.*` imports).
-- `pyproject.toml` lists `streamlit`, `torch`, `transformers` — these are not used. The real stack is FastAPI + LangGraph + Ollama + Tavily + Postgres.
+- The real stack is FastAPI + LangGraph + Ollama + Tavily + Postgres.

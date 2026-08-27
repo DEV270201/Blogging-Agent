@@ -1,0 +1,33 @@
+# Version control
+.git/
+.gitignore
+
+# Frontend — deployed separately
+client/
+
+# Tests — not needed in the production image
+tests/
+
+# Local virtual environment — rebuilt fresh inside the image
+.venv/
+
+# Secrets — never bake into an image; inject at runtime via env vars or --env-file
+.env
+
+# Generated blog content — written by the container at runtime
+Server/blogs/
+
+# Python bytecode and cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Documentation
+*.md
+
+# Editor and OS artifacts
+.vscode/
+.idea/
+.DS_Store
