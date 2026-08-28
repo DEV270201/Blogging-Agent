@@ -19,6 +19,40 @@ I build this in versioned milestones. Each one is a self-contained, shipped incr
 
 ---
 
+## 🔄 CI / CD pipeline integrated with branch specific rulesets
+
+Two GitHub Actions workflows automate testing and deployment
+
+```mermaid
+flowchart TD
+    DEV([Developer pushes\nto feature branch]) --> PR[Opens Pull Request → main]
+
+    PR --> CHK{Server/ or tests/\nor .github/workflows/\nchanged?}
+    CHK -- No --> SKIP[Steps skipped\n✅ PR can be reviewed]
+    CHK -- Yes --> TESTS[pytest — full suite\nunit + integration\nfully mocked · no DB needed]
+
+    TESTS -- All pass --> READY[✅ PR ready to merge]
+    TESTS -- Any fail --> BLOCKED[❌ PR blocked\nresults posted to\nActions summary]
+
+    READY --> MERGE([Merge to main])
+
+    MERGE --> DCHK{Dockerfile or\nServer/ changed?}
+    DCHK -- No --> NOOP[No deploy triggered]
+    DCHK -- Yes --> OIDC[Authenticate to AWS\nvia GitHub OIDC\nno long-lived keys]
+    OIDC --> ECR[Login to Amazon ECR]
+    ECR --> BUILD[Build Docker image\nmulti-stage · python:3.12-slim]
+    BUILD --> PUSH[Push to ECR\n:latest + :git-sha]
+```
+
+| Workflow         | Trigger                                                                            | What it does                                                                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pr-tests.yml` | PR to`main` (only if `Server/`, `tests/`, or `.github/workflows/` changed) | Runs the full pytest suite; posts results to the Actions summary; blocks merge on failure                                                           |
+| `deploy.yml`   | Push to`main` (only if `Dockerfile` or `Server/` changed)                    | Builds the multi-stage Docker image and pushes it to Amazon ECR tagged`:latest` and `:<git-sha>` via GitHub OIDC. No long-lived AWS credentials |
+
+**Required GitHub secrets:** `AWS_ACCOUNT_ID`, `AWS_REGION`, `ECR_REPOSITORY_NAME`
+
+---
+
 ## ✨ Features
 
 - **Topic → published-ready blog** — give it a topic, get back a structured Markdown post.
